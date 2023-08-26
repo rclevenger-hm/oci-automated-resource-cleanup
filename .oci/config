@@ -1,0 +1,6 @@
+[DEFAULT]
+user=<YOUR_USER_OCID>
+fingerprint=<YOUR_FINGERPRINT>
+key_file=<PATH_TO_PRIVATE_KEY_FILE>
+tenancy=<YOUR_TENANCY_OCID>
+region=<OCI_REGION>
