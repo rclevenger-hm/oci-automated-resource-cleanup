@@ -1,46 +1,94 @@
-# Automated Resource Cleanup
+# OCI Automated Resource Cleanup
 
-This repository contains a small OCI cleanup tool for identifying long-running compute instances that match explicit cleanup policy controls. It is safe by default: the cleanup logic runs in dry-run mode unless you explicitly disable that behavior.
+Safe-by-default cleanup automation for Oracle Cloud Infrastructure. This project finds OCI compute instances that match explicit cleanup policy rules and then either reports them, stops them, or terminates them.
 
-The project now supports both of these execution modes:
+The repository supports two execution modes:
 
-- A local Python job you can run from a workstation, CI job, or scheduler.
-- An OCI Functions deployment using the handler and `func.yaml` in the `function/` directory.
+- Local or scheduled Python execution
+- OCI Functions deployment via the `function/` directory
 
-## What It Does
+## Why This Exists
 
-- Lists compute instances in a target compartment using OCI pagination.
-- Filters candidates by lifecycle state, age threshold, and optional freeform tag requirements.
-- Logs the instances it would terminate.
-- Skips actual termination unless `OCI_CLEANUP_DRY_RUN=false`.
+Cloud cleanup scripts are easy to get wrong. A simple "delete anything older than 24 hours" rule is risky, especially in shared or long-lived environments.
 
-## Current Safety Model
+This project adds guardrails around cleanup actions:
 
-The script does not claim to detect true idleness from monitoring data. Today it selects instances that are:
+- Dry-run mode is the default
+- Instances can require an opt-in tag
+- Instances can be protected by an exclusion tag
+- A per-run action cap limits blast radius
+- Every evaluated instance can be recorded in a structured report
+- A safer `stop` action is available before full termination
 
-- In the `RUNNING` lifecycle state.
-- Older than the configured threshold.
-- Optionally marked with a required freeform tag such as `AutoCleanup=true`.
+## Current Behavior
 
-That makes it much safer than deleting all old instances, but you should still treat it as policy-driven cleanup rather than intelligent idle detection.
+The cleanup policy currently targets OCI compute instances that are:
+
+- In the `RUNNING` lifecycle state
+- Older than a configured age threshold
+- Optionally marked with a required freeform tag such as `AutoCleanup=true`
+- Not marked with an exclusion tag such as `DoNotCleanup=true`
+
+Important: this is still policy-driven cleanup, not true idle detection. The project does not yet use OCI Monitoring metrics like CPU or network utilization to decide whether an instance is idle.
+
+## Repository Layout
+
+- `function/cleanup_resources.py`: shared cleanup logic, config loading, policy evaluation, reporting, and action execution
+- `function/handler.py`: OCI Functions entrypoint
+- `function/func.yaml`: OCI Functions manifest
+- `function/test_cleanup_resources.py`: unit tests for cleanup policy and execution behavior
+
+## Features
+
+- Pagination-aware OCI instance discovery
+- Dry-run by default
+- Required-tag opt-in
+- Exclusion-tag protection
+- `terminate` and `stop` cleanup actions
+- Per-run processing cap
+- JSON policy file support
+- Structured JSON report output
+- OCI config-file auth and OCI resource principal auth support
 
 ## Configuration
 
-Set these environment variables before running the script:
+The cleanup logic can be configured with environment variables, an optional JSON policy file, or a request payload when invoked as an OCI Function.
 
-- `OCI_COMPARTMENT_ID` (required): Target compartment OCID.
-- `OCI_CLEANUP_THRESHOLD_HOURS` (optional): Minimum age in hours before an instance is considered a cleanup candidate. Default: `24`.
-- `OCI_CLEANUP_DRY_RUN` (optional): `true` by default. Set to `false` to allow real termination.
-- `OCI_CLEANUP_REQUIRED_TAG_KEY` (optional): Freeform tag key an instance must have to be eligible.
-- `OCI_CLEANUP_REQUIRED_TAG_VALUE` (optional): If set, the tag value must match exactly.
-- `OCI_AUTH_MODE` (optional): `auto` by default. Use `config` to force OCI config-file auth or `resource_principal` for OCI Functions.
-- `OCI_CONFIG_FILE` (optional): Path to an OCI config file.
-- `OCI_CONFIG_PROFILE` (optional): OCI config profile name. Default: `DEFAULT`.
-- `LOG_LEVEL` (optional): Logging level. Default: `INFO`.
+### Environment Variables
 
-## OCI Credentials
+- `OCI_COMPARTMENT_ID` required. Target compartment OCID.
+- `OCI_CLEANUP_THRESHOLD_HOURS` optional. Minimum resource age before it becomes eligible. Default: `24`.
+- `OCI_CLEANUP_DRY_RUN` optional. Default: `true`.
+- `OCI_CLEANUP_ACTION` optional. `terminate` by default. Set to `stop` for quarantine-style runs.
+- `OCI_CLEANUP_MAX_TERMINATIONS_PER_RUN` optional. Maximum number of eligible resources to process in a single run.
+- `OCI_CLEANUP_REQUIRED_TAG_KEY` optional. Freeform tag key that must exist for a resource to be eligible.
+- `OCI_CLEANUP_REQUIRED_TAG_VALUE` optional. If set, the required tag must match this value exactly.
+- `OCI_CLEANUP_EXCLUDED_TAG_KEY` optional. Freeform tag key that protects a resource from cleanup.
+- `OCI_CLEANUP_EXCLUDED_TAG_VALUE` optional. If set, the exclusion tag must match this value exactly.
+- `OCI_CLEANUP_REPORT_FILE` optional. Writes a JSON report to this path after a run.
+- `OCI_CLEANUP_POLICY_FILE` optional. Path to a JSON file containing cleanup defaults.
+- `OCI_AUTH_MODE` optional. `auto` by default. Valid values are `auto`, `config`, and `resource_principal`.
+- `OCI_CONFIG_FILE` optional. OCI config file path for local execution.
+- `OCI_CONFIG_PROFILE` optional. OCI config profile name. Default: `DEFAULT`.
+- `LOG_LEVEL` optional. Default: `INFO`.
 
-Use a normal OCI CLI configuration outside the repository when possible. A local placeholder config file exists in `.oci/config`, but production credentials should not be committed to source control.
+### Policy File Example
+
+```json
+{
+  "compartment_id": "ocid1.compartment.oc1..exampleuniqueID",
+  "threshold_hours": 72,
+  "dry_run": true,
+  "action": "stop",
+  "max_terminations_per_run": 5,
+  "required_tag_key": "AutoCleanup",
+  "required_tag_value": "true",
+  "excluded_tag_key": "DoNotCleanup",
+  "excluded_tag_value": "true",
+  "report_file": "cleanup-report.json",
+  "auth_mode": "resource_principal"
+}
+```
 
 ## Install
 
@@ -48,30 +96,28 @@ Use a normal OCI CLI configuration outside the repository when possible. A local
 pip install -r function/requirements.txt
 ```
 
-## Project Layout
-
-- [function/cleanup_resources.py](/C:/Users/cuder/OneDrive/Documents/GitHub/oci-automated-resource-cleanup/function/cleanup_resources.py:1): Shared cleanup logic used by both local and serverless execution.
-- [function/handler.py](/C:/Users/cuder/OneDrive/Documents/GitHub/oci-automated-resource-cleanup/function/handler.py:1): OCI Functions entrypoint.
-- [function/func.yaml](/C:/Users/cuder/OneDrive/Documents/GitHub/oci-automated-resource-cleanup/function/func.yaml:1): OCI Functions manifest.
-
 ## Run Locally
 
-Dry run:
+Example dry run on Windows PowerShell:
 
-```bash
-set OCI_COMPARTMENT_ID=<your_compartment_ocid>
-set OCI_CLEANUP_REQUIRED_TAG_KEY=AutoCleanup
-set OCI_CLEANUP_REQUIRED_TAG_VALUE=true
+```powershell
+$env:OCI_COMPARTMENT_ID = "ocid1.compartment.oc1..exampleuniqueID"
+$env:OCI_CLEANUP_REQUIRED_TAG_KEY = "AutoCleanup"
+$env:OCI_CLEANUP_REQUIRED_TAG_VALUE = "true"
+$env:OCI_CLEANUP_EXCLUDED_TAG_KEY = "DoNotCleanup"
+$env:OCI_CLEANUP_EXCLUDED_TAG_VALUE = "true"
+$env:OCI_CLEANUP_ACTION = "stop"
 python function/cleanup_resources.py
 ```
 
-Real termination:
+Example real termination run:
 
-```bash
-set OCI_COMPARTMENT_ID=<your_compartment_ocid>
-set OCI_CLEANUP_REQUIRED_TAG_KEY=AutoCleanup
-set OCI_CLEANUP_REQUIRED_TAG_VALUE=true
-set OCI_CLEANUP_DRY_RUN=false
+```powershell
+$env:OCI_COMPARTMENT_ID = "ocid1.compartment.oc1..exampleuniqueID"
+$env:OCI_CLEANUP_REQUIRED_TAG_KEY = "AutoCleanup"
+$env:OCI_CLEANUP_REQUIRED_TAG_VALUE = "true"
+$env:OCI_CLEANUP_DRY_RUN = "false"
+$env:OCI_CLEANUP_ACTION = "terminate"
 python function/cleanup_resources.py
 ```
 
@@ -83,41 +129,59 @@ From the `function/` directory:
 fn -v deploy --app <your_fn_app_name>
 ```
 
-After deployment, configure the same environment variables on the function in OCI:
+For OCI Functions, prefer resource principals:
+
+```bash
+fn config function <your_fn_app_name> oci-automated-resource-cleanup OCI_AUTH_MODE resource_principal
+```
+
+You will typically also set function configuration values for:
 
 - `OCI_COMPARTMENT_ID`
 - `OCI_CLEANUP_THRESHOLD_HOURS`
 - `OCI_CLEANUP_DRY_RUN`
+- `OCI_CLEANUP_ACTION`
 - `OCI_CLEANUP_REQUIRED_TAG_KEY`
 - `OCI_CLEANUP_REQUIRED_TAG_VALUE`
-- `OCI_AUTH_MODE`
-- `OCI_CONFIG_PROFILE`
+- `OCI_CLEANUP_EXCLUDED_TAG_KEY`
+- `OCI_CLEANUP_EXCLUDED_TAG_VALUE`
+- `OCI_CLEANUP_MAX_TERMINATIONS_PER_RUN`
 - `LOG_LEVEL`
 
-For OCI Functions, set `OCI_AUTH_MODE=resource_principal` so the runtime uses resource principals instead of a local OCI config file.
+## Invoke The OCI Function
 
-## Invoke The Function
+The function accepts an optional JSON body. Request values override defaults from the environment or policy file for that invocation.
 
-The OCI Functions handler accepts an optional JSON body. Any of these keys can override the environment-backed defaults for a single invocation:
+Supported request fields:
 
 - `compartment_id`
 - `threshold_hours`
 - `dry_run`
+- `action`
+- `max_terminations_per_run`
 - `required_tag_key`
 - `required_tag_value`
+- `excluded_tag_key`
+- `excluded_tag_value`
+- `report_file`
+- `policy_file`
 - `auth_mode`
 - `config_path`
 - `config_profile`
 
-Example payload:
+Example request body:
 
 ```json
 {
   "compartment_id": "ocid1.compartment.oc1..exampleuniqueID",
   "threshold_hours": 72,
   "dry_run": true,
+  "action": "stop",
   "required_tag_key": "AutoCleanup",
-  "required_tag_value": "true"
+  "required_tag_value": "true",
+  "excluded_tag_key": "DoNotCleanup",
+  "excluded_tag_value": "true",
+  "max_terminations_per_run": 5
 }
 ```
 
@@ -128,12 +192,18 @@ cd function
 python -m unittest test_cleanup_resources.py
 ```
 
-## Suggested Next Enhancements
+## Known Limitations
 
-- Add OCI Monitoring-based CPU or network checks to support real idle detection.
-- Add support for multiple resource types instead of compute instances only.
-- Emit structured audit output to a file or object storage.
-- Switch the OCI Function path from local config loading to resource principals for production use.
+- Cleanup eligibility is still based on age and tag policy, not OCI utilization metrics
+- Only compute instances are supported today
+- Reports are written locally; there is no Object Storage or Notifications integration yet
+
+## Recommended Next Steps
+
+- Add OCI Monitoring-based idle detection
+- Support more OCI resource types
+- Publish reports to OCI Object Storage or OCI Logging
+- Add notifications for non-dry-run executions and failures
 
 ## License
 
