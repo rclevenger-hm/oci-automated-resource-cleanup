@@ -46,31 +46,43 @@ def parse_bool(value: Any, default: bool = True) -> bool:
     return str(value).lower() not in {"0", "false", "no"}
 
 
+def load_policy_file(path: str) -> Mapping[str, Any]:
+    with open(path, "r", encoding="utf-8") as policy_handle:
+        return json.load(policy_handle)
+
+
 def load_config(overrides: Optional[Mapping[str, Any]] = None) -> CleanupConfig:
     override_values = dict(overrides or {})
-    compartment_id = override_values.get("compartment_id") or os.environ["OCI_COMPARTMENT_ID"]
+    policy_file = override_values.get("policy_file", os.environ.get("OCI_CLEANUP_POLICY_FILE"))
+    policy_values = dict(load_policy_file(policy_file)) if policy_file else {}
+
+    merged_values = dict(policy_values)
+    merged_values.update({key: value for key, value in os.environ.items() if key.startswith("OCI_")})
+    merged_values.update(override_values)
+
+    compartment_id = merged_values.get("compartment_id") or os.environ["OCI_COMPARTMENT_ID"]
     threshold_hours = int(
-        override_values.get("threshold_hours", os.environ.get("OCI_CLEANUP_THRESHOLD_HOURS", "24"))
+        merged_values.get("threshold_hours", os.environ.get("OCI_CLEANUP_THRESHOLD_HOURS", "24"))
     )
-    dry_run = parse_bool(override_values.get("dry_run", os.environ.get("OCI_CLEANUP_DRY_RUN", "true")))
-    max_terminations_per_run = override_values.get(
+    dry_run = parse_bool(merged_values.get("dry_run", os.environ.get("OCI_CLEANUP_DRY_RUN", "true")))
+    max_terminations_per_run = merged_values.get(
         "max_terminations_per_run",
         os.environ.get("OCI_CLEANUP_MAX_TERMINATIONS_PER_RUN"),
     )
-    report_file = override_values.get("report_file", os.environ.get("OCI_CLEANUP_REPORT_FILE"))
-    required_tag_key = override_values.get("required_tag_key", os.environ.get("OCI_CLEANUP_REQUIRED_TAG_KEY"))
-    required_tag_value = override_values.get(
+    report_file = merged_values.get("report_file", os.environ.get("OCI_CLEANUP_REPORT_FILE"))
+    required_tag_key = merged_values.get("required_tag_key", os.environ.get("OCI_CLEANUP_REQUIRED_TAG_KEY"))
+    required_tag_value = merged_values.get(
         "required_tag_value",
         os.environ.get("OCI_CLEANUP_REQUIRED_TAG_VALUE"),
     )
-    excluded_tag_key = override_values.get("excluded_tag_key", os.environ.get("OCI_CLEANUP_EXCLUDED_TAG_KEY"))
-    excluded_tag_value = override_values.get(
+    excluded_tag_key = merged_values.get("excluded_tag_key", os.environ.get("OCI_CLEANUP_EXCLUDED_TAG_KEY"))
+    excluded_tag_value = merged_values.get(
         "excluded_tag_value",
         os.environ.get("OCI_CLEANUP_EXCLUDED_TAG_VALUE"),
     )
-    auth_mode = override_values.get("auth_mode", os.environ.get("OCI_AUTH_MODE", "auto"))
-    config_path = override_values.get("config_path", os.environ.get("OCI_CONFIG_FILE"))
-    config_profile = override_values.get("config_profile", os.environ.get("OCI_CONFIG_PROFILE", "DEFAULT"))
+    auth_mode = merged_values.get("auth_mode", os.environ.get("OCI_AUTH_MODE", "auto"))
+    config_path = merged_values.get("config_path", os.environ.get("OCI_CONFIG_FILE"))
+    config_profile = merged_values.get("config_profile", os.environ.get("OCI_CONFIG_PROFILE", "DEFAULT"))
 
     return CleanupConfig(
         compartment_id=compartment_id,

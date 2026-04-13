@@ -136,6 +136,54 @@ class LoadConfigTests(unittest.TestCase):
         self.assertEqual(config.excluded_tag_value, "true")
         self.assertEqual(config.auth_mode, "resource_principal")
 
+    def test_load_config_reads_policy_file_defaults(self):
+        original = dict(os.environ)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(original)))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            policy_path = os.path.join(temp_dir, "policy.json")
+            with open(policy_path, "w", encoding="utf-8") as policy_handle:
+                json.dump(
+                    {
+                        "compartment_id": "policy-compartment",
+                        "threshold_hours": 96,
+                        "dry_run": False,
+                        "required_tag_key": "AutoCleanup",
+                    },
+                    policy_handle,
+                )
+
+            config = cleanup_resources.load_config({"policy_file": policy_path})
+
+        self.assertEqual(config.compartment_id, "policy-compartment")
+        self.assertEqual(config.threshold_hours, 96)
+        self.assertFalse(config.dry_run)
+        self.assertEqual(config.required_tag_key, "AutoCleanup")
+
+    def test_load_config_prefers_explicit_overrides_over_policy_file(self):
+        original = dict(os.environ)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(original)))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            policy_path = os.path.join(temp_dir, "policy.json")
+            with open(policy_path, "w", encoding="utf-8") as policy_handle:
+                json.dump(
+                    {
+                        "compartment_id": "policy-compartment",
+                        "threshold_hours": 96,
+                    },
+                    policy_handle,
+                )
+
+            config = cleanup_resources.load_config(
+                {
+                    "policy_file": policy_path,
+                    "compartment_id": "override-compartment",
+                    "threshold_hours": 48,
+                }
+            )
+
+        self.assertEqual(config.compartment_id, "override-compartment")
+        self.assertEqual(config.threshold_hours, 48)
+
 
 class HandleCleanupTests(unittest.TestCase):
     @patch("cleanup_resources.terminate_instance")
