@@ -2,7 +2,7 @@ import datetime
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import cleanup_resources
 
@@ -104,6 +104,7 @@ class LoadConfigTests(unittest.TestCase):
                 "compartment_id": "payload-compartment",
                 "threshold_hours": 72,
                 "dry_run": False,
+                "max_terminations_per_run": 5,
                 "required_tag_key": "AutoCleanup",
                 "required_tag_value": "true",
                 "excluded_tag_key": "DoNotCleanup",
@@ -115,11 +116,40 @@ class LoadConfigTests(unittest.TestCase):
         self.assertEqual(config.compartment_id, "payload-compartment")
         self.assertEqual(config.threshold_hours, 72)
         self.assertFalse(config.dry_run)
+        self.assertEqual(config.max_terminations_per_run, 5)
         self.assertEqual(config.required_tag_key, "AutoCleanup")
         self.assertEqual(config.required_tag_value, "true")
         self.assertEqual(config.excluded_tag_key, "DoNotCleanup")
         self.assertEqual(config.excluded_tag_value, "true")
         self.assertEqual(config.auth_mode, "resource_principal")
+
+
+class HandleCleanupTests(unittest.TestCase):
+    @patch("cleanup_resources.terminate_instance")
+    @patch("cleanup_resources.get_cleanup_candidates")
+    @patch("cleanup_resources.get_compute_client")
+    def test_handle_cleanup_limits_number_of_terminations(
+        self,
+        mock_get_compute_client,
+        mock_get_cleanup_candidates,
+        mock_terminate_instance,
+    ):
+        mock_get_compute_client.return_value = Mock()
+        mock_get_cleanup_candidates.return_value = [
+            make_instance(hours_old=72),
+            SimpleNamespace(**{**make_instance(hours_old=73).__dict__, "id": "ocid2"}),
+            SimpleNamespace(**{**make_instance(hours_old=74).__dict__, "id": "ocid3"}),
+        ]
+
+        config = cleanup_resources.CleanupConfig(
+            compartment_id="compartment",
+            max_terminations_per_run=2,
+        )
+
+        result = cleanup_resources.handle_cleanup(config)
+
+        self.assertEqual(result, 2)
+        self.assertEqual(mock_terminate_instance.call_count, 2)
 
 
 if __name__ == "__main__":

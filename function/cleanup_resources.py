@@ -18,6 +18,7 @@ class CleanupConfig:
     compartment_id: str
     threshold_hours: int = 24
     dry_run: bool = True
+    max_terminations_per_run: Optional[int] = None
     required_tag_key: Optional[str] = None
     required_tag_value: Optional[str] = None
     excluded_tag_key: Optional[str] = None
@@ -42,6 +43,10 @@ def load_config(overrides: Optional[Mapping[str, Any]] = None) -> CleanupConfig:
         override_values.get("threshold_hours", os.environ.get("OCI_CLEANUP_THRESHOLD_HOURS", "24"))
     )
     dry_run = parse_bool(override_values.get("dry_run", os.environ.get("OCI_CLEANUP_DRY_RUN", "true")))
+    max_terminations_per_run = override_values.get(
+        "max_terminations_per_run",
+        os.environ.get("OCI_CLEANUP_MAX_TERMINATIONS_PER_RUN"),
+    )
     required_tag_key = override_values.get("required_tag_key", os.environ.get("OCI_CLEANUP_REQUIRED_TAG_KEY"))
     required_tag_value = override_values.get(
         "required_tag_value",
@@ -60,6 +65,7 @@ def load_config(overrides: Optional[Mapping[str, Any]] = None) -> CleanupConfig:
         compartment_id=compartment_id,
         threshold_hours=threshold_hours,
         dry_run=dry_run,
+        max_terminations_per_run=int(max_terminations_per_run) if max_terminations_per_run is not None else None,
         required_tag_key=required_tag_key,
         required_tag_value=required_tag_value,
         excluded_tag_key=excluded_tag_key,
@@ -204,10 +210,19 @@ def handle_cleanup(config: Optional[CleanupConfig] = None) -> int:
     active_config = config or load_config_from_env()
     compute_client = get_compute_client(active_config)
     candidates = get_cleanup_candidates(compute_client, active_config)
+    candidate_count = len(candidates)
+    if active_config.max_terminations_per_run is not None:
+        candidates = candidates[: active_config.max_terminations_per_run]
+        if candidate_count > len(candidates):
+            LOGGER.warning(
+                "Limiting cleanup to %s of %s candidate instance(s)",
+                len(candidates),
+                candidate_count,
+            )
 
     LOGGER.info(
         "Found %s candidate instance(s) in compartment %s",
-        len(candidates),
+        candidate_count,
         active_config.compartment_id,
     )
 
