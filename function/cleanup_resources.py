@@ -19,6 +19,7 @@ class CleanupConfig:
     compartment_id: str
     threshold_hours: int = 24
     dry_run: bool = True
+    action: str = "terminate"
     max_terminations_per_run: Optional[int] = None
     report_file: Optional[str] = None
     required_tag_key: Optional[str] = None
@@ -65,6 +66,7 @@ def load_config(overrides: Optional[Mapping[str, Any]] = None) -> CleanupConfig:
         merged_values.get("threshold_hours", os.environ.get("OCI_CLEANUP_THRESHOLD_HOURS", "24"))
     )
     dry_run = parse_bool(merged_values.get("dry_run", os.environ.get("OCI_CLEANUP_DRY_RUN", "true")))
+    action = merged_values.get("action", os.environ.get("OCI_CLEANUP_ACTION", "terminate"))
     max_terminations_per_run = merged_values.get(
         "max_terminations_per_run",
         os.environ.get("OCI_CLEANUP_MAX_TERMINATIONS_PER_RUN"),
@@ -88,6 +90,7 @@ def load_config(overrides: Optional[Mapping[str, Any]] = None) -> CleanupConfig:
         compartment_id=compartment_id,
         threshold_hours=threshold_hours,
         dry_run=dry_run,
+        action=action,
         max_terminations_per_run=int(max_terminations_per_run) if max_terminations_per_run is not None else None,
         report_file=report_file,
         required_tag_key=required_tag_key,
@@ -272,10 +275,22 @@ def write_cleanup_report(path: str, report: Mapping[str, Any]) -> None:
         report_handle.write("\n")
 
 
-def terminate_instance(compute_client, instance_id: str, dry_run: bool = True) -> None:
+def execute_cleanup_action(
+    compute_client,
+    instance_id: str,
+    action: str = "terminate",
+    dry_run: bool = True,
+) -> None:
     if dry_run:
-        LOGGER.info("Dry run enabled, skipping termination for %s", instance_id)
+        LOGGER.info("Dry run enabled, skipping %s for %s", action, instance_id)
         return
+
+    if action == "stop":
+        compute_client.instance_action(instance_id, "STOP")
+        return
+
+    if action != "terminate":
+        raise ValueError(f"Unsupported cleanup action: {action}")
 
     compute_client.terminate_instance(instance_id)
 
@@ -309,10 +324,16 @@ def handle_cleanup(config: Optional[CleanupConfig] = None) -> int:
             active_config.threshold_hours,
             active_config.dry_run,
         )
-        terminate_instance(compute_client, instance.instance_id, dry_run=active_config.dry_run)
+        execute_cleanup_action(
+            compute_client,
+            instance.instance_id,
+            action=active_config.action,
+            dry_run=active_config.dry_run,
+        )
 
     if active_config.report_file:
         report = {
+            "action": active_config.action,
             "candidate_count": candidate_count,
             "compartment_id": active_config.compartment_id,
             "decisions": [asdict(decision) for decision in decisions],

@@ -88,20 +88,34 @@ class ShouldTerminateInstanceTests(unittest.TestCase):
         self.assertFalse(result)
 
 
-class TerminateInstanceTests(unittest.TestCase):
+class ExecuteCleanupActionTests(unittest.TestCase):
     def test_dry_run_skips_termination(self):
         compute_client = Mock()
 
-        cleanup_resources.terminate_instance(compute_client, "ocid1.instance.oc1..example", dry_run=True)
+        cleanup_resources.execute_cleanup_action(compute_client, "ocid1.instance.oc1..example", dry_run=True)
 
         compute_client.terminate_instance.assert_not_called()
+        compute_client.instance_action.assert_not_called()
 
     def test_live_mode_terminates_instance(self):
         compute_client = Mock()
 
-        cleanup_resources.terminate_instance(compute_client, "ocid1.instance.oc1..example", dry_run=False)
+        cleanup_resources.execute_cleanup_action(compute_client, "ocid1.instance.oc1..example", dry_run=False)
 
         compute_client.terminate_instance.assert_called_once_with("ocid1.instance.oc1..example")
+
+    def test_stop_action_uses_instance_action(self):
+        compute_client = Mock()
+
+        cleanup_resources.execute_cleanup_action(
+            compute_client,
+            "ocid1.instance.oc1..example",
+            action="stop",
+            dry_run=False,
+        )
+
+        compute_client.instance_action.assert_called_once_with("ocid1.instance.oc1..example", "STOP")
+        compute_client.terminate_instance.assert_not_called()
 
 
 class LoadConfigTests(unittest.TestCase):
@@ -115,6 +129,7 @@ class LoadConfigTests(unittest.TestCase):
                 "compartment_id": "payload-compartment",
                 "threshold_hours": 72,
                 "dry_run": False,
+                "action": "stop",
                 "max_terminations_per_run": 5,
                 "report_file": "cleanup-report.json",
                 "required_tag_key": "AutoCleanup",
@@ -128,6 +143,7 @@ class LoadConfigTests(unittest.TestCase):
         self.assertEqual(config.compartment_id, "payload-compartment")
         self.assertEqual(config.threshold_hours, 72)
         self.assertFalse(config.dry_run)
+        self.assertEqual(config.action, "stop")
         self.assertEqual(config.max_terminations_per_run, 5)
         self.assertEqual(config.report_file, "cleanup-report.json")
         self.assertEqual(config.required_tag_key, "AutoCleanup")
@@ -186,14 +202,14 @@ class LoadConfigTests(unittest.TestCase):
 
 
 class HandleCleanupTests(unittest.TestCase):
-    @patch("cleanup_resources.terminate_instance")
+    @patch("cleanup_resources.execute_cleanup_action")
     @patch("cleanup_resources.get_cleanup_decisions")
     @patch("cleanup_resources.get_compute_client")
     def test_handle_cleanup_limits_number_of_terminations(
         self,
         mock_get_compute_client,
         mock_get_cleanup_decisions,
-        mock_terminate_instance,
+        mock_execute_cleanup_action,
     ):
         mock_get_compute_client.return_value = Mock()
         mock_get_cleanup_decisions.return_value = [
@@ -210,14 +226,14 @@ class HandleCleanupTests(unittest.TestCase):
         result = cleanup_resources.handle_cleanup(config)
 
         self.assertEqual(result, 2)
-        self.assertEqual(mock_terminate_instance.call_count, 2)
+        self.assertEqual(mock_execute_cleanup_action.call_count, 2)
 
-    @patch("cleanup_resources.terminate_instance")
+    @patch("cleanup_resources.execute_cleanup_action")
     @patch("cleanup_resources.get_compute_client")
     def test_handle_cleanup_writes_structured_report(
         self,
         mock_get_compute_client,
-        mock_terminate_instance,
+        mock_execute_cleanup_action,
     ):
         mock_get_compute_client.return_value = Mock()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -231,6 +247,7 @@ class HandleCleanupTests(unittest.TestCase):
             ):
                 config = cleanup_resources.CleanupConfig(
                     compartment_id="compartment",
+                    action="stop",
                     dry_run=True,
                     report_file=report_path,
                 )
@@ -238,10 +255,11 @@ class HandleCleanupTests(unittest.TestCase):
                 result = cleanup_resources.handle_cleanup(config)
 
             self.assertEqual(result, 1)
-            self.assertEqual(mock_terminate_instance.call_count, 1)
+            self.assertEqual(mock_execute_cleanup_action.call_count, 1)
             with open(report_path, "r", encoding="utf-8") as report_handle:
                 report = json.load(report_handle)
 
+        self.assertEqual(report["action"], "stop")
         self.assertEqual(report["candidate_count"], 1)
         self.assertEqual(report["processed_count"], 1)
         self.assertEqual(report["decisions"][1]["reason"], "required_tag_missing")
