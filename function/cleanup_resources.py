@@ -1,7 +1,8 @@
 import datetime
+import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Mapping, Optional
 
 try:
@@ -19,6 +20,7 @@ class CleanupConfig:
     threshold_hours: int = 24
     dry_run: bool = True
     max_terminations_per_run: Optional[int] = None
+    report_file: Optional[str] = None
     required_tag_key: Optional[str] = None
     required_tag_value: Optional[str] = None
     excluded_tag_key: Optional[str] = None
@@ -26,6 +28,14 @@ class CleanupConfig:
     auth_mode: str = "auto"
     config_path: Optional[str] = None
     config_profile: str = "DEFAULT"
+
+
+@dataclass
+class CleanupDecision:
+    instance_id: str
+    display_name: str
+    eligible: bool
+    reason: str
 
 
 def parse_bool(value: Any, default: bool = True) -> bool:
@@ -47,6 +57,7 @@ def load_config(overrides: Optional[Mapping[str, Any]] = None) -> CleanupConfig:
         "max_terminations_per_run",
         os.environ.get("OCI_CLEANUP_MAX_TERMINATIONS_PER_RUN"),
     )
+    report_file = override_values.get("report_file", os.environ.get("OCI_CLEANUP_REPORT_FILE"))
     required_tag_key = override_values.get("required_tag_key", os.environ.get("OCI_CLEANUP_REQUIRED_TAG_KEY"))
     required_tag_value = override_values.get(
         "required_tag_value",
@@ -66,6 +77,7 @@ def load_config(overrides: Optional[Mapping[str, Any]] = None) -> CleanupConfig:
         threshold_hours=threshold_hours,
         dry_run=dry_run,
         max_terminations_per_run=int(max_terminations_per_run) if max_terminations_per_run is not None else None,
+        report_file=report_file,
         required_tag_key=required_tag_key,
         required_tag_value=required_tag_value,
         excluded_tag_key=excluded_tag_key,
@@ -156,6 +168,32 @@ def has_excluded_tag(instance, excluded_tag_key: Optional[str], excluded_tag_val
     return str(freeform_tags.get(excluded_tag_key)) == excluded_tag_value
 
 
+def evaluate_instance(
+    instance,
+    now: datetime.datetime,
+    threshold_hours: int,
+    required_tag_key: Optional[str] = None,
+    required_tag_value: Optional[str] = None,
+    excluded_tag_key: Optional[str] = None,
+    excluded_tag_value: Optional[str] = None,
+) -> CleanupDecision:
+    if getattr(instance, "lifecycle_state", None) != "RUNNING":
+        return CleanupDecision(instance.id, instance.display_name, False, "lifecycle_state_not_running")
+
+    if not has_required_tag(instance, required_tag_key, required_tag_value):
+        return CleanupDecision(instance.id, instance.display_name, False, "required_tag_missing")
+
+    if has_excluded_tag(instance, excluded_tag_key, excluded_tag_value):
+        return CleanupDecision(instance.id, instance.display_name, False, "excluded_tag_present")
+
+    launch_time = normalize_timestamp(instance.time_created)
+    elapsed_time = now - launch_time
+    if elapsed_time.total_seconds() / 3600 <= threshold_hours:
+        return CleanupDecision(instance.id, instance.display_name, False, "below_age_threshold")
+
+    return CleanupDecision(instance.id, instance.display_name, True, "eligible")
+
+
 def should_terminate_instance(
     instance,
     now: datetime.datetime,
@@ -165,18 +203,16 @@ def should_terminate_instance(
     excluded_tag_key: Optional[str] = None,
     excluded_tag_value: Optional[str] = None,
 ) -> bool:
-    if getattr(instance, "lifecycle_state", None) != "RUNNING":
-        return False
-
-    if not has_required_tag(instance, required_tag_key, required_tag_value):
-        return False
-
-    if has_excluded_tag(instance, excluded_tag_key, excluded_tag_value):
-        return False
-
-    launch_time = normalize_timestamp(instance.time_created)
-    elapsed_time = now - launch_time
-    return elapsed_time.total_seconds() / 3600 > threshold_hours
+    decision = evaluate_instance(
+        instance,
+        now,
+        threshold_hours,
+        required_tag_key,
+        required_tag_value,
+        excluded_tag_key,
+        excluded_tag_value,
+    )
+    return decision.eligible
 
 
 def get_cleanup_candidates(compute_client, config: CleanupConfig):
@@ -198,6 +234,32 @@ def get_cleanup_candidates(compute_client, config: CleanupConfig):
     return candidates
 
 
+def get_cleanup_decisions(compute_client, config: CleanupConfig):
+    now = get_current_time()
+    decisions = []
+
+    for instance in list_instances(compute_client, config.compartment_id):
+        decisions.append(
+            evaluate_instance(
+                instance,
+                now,
+                config.threshold_hours,
+                config.required_tag_key,
+                config.required_tag_value,
+                config.excluded_tag_key,
+                config.excluded_tag_value,
+            )
+        )
+
+    return decisions
+
+
+def write_cleanup_report(path: str, report: Mapping[str, Any]) -> None:
+    with open(path, "w", encoding="utf-8") as report_handle:
+        json.dump(report, report_handle, indent=2, sort_keys=True)
+        report_handle.write("\n")
+
+
 def terminate_instance(compute_client, instance_id: str, dry_run: bool = True) -> None:
     if dry_run:
         LOGGER.info("Dry run enabled, skipping termination for %s", instance_id)
@@ -209,7 +271,8 @@ def terminate_instance(compute_client, instance_id: str, dry_run: bool = True) -
 def handle_cleanup(config: Optional[CleanupConfig] = None) -> int:
     active_config = config or load_config_from_env()
     compute_client = get_compute_client(active_config)
-    candidates = get_cleanup_candidates(compute_client, active_config)
+    decisions = get_cleanup_decisions(compute_client, active_config)
+    candidates = [decision for decision in decisions if decision.eligible]
     candidate_count = len(candidates)
     if active_config.max_terminations_per_run is not None:
         candidates = candidates[: active_config.max_terminations_per_run]
@@ -230,11 +293,21 @@ def handle_cleanup(config: Optional[CleanupConfig] = None) -> int:
         LOGGER.info(
             "Processing instance %s (%s), threshold=%sh, dry_run=%s",
             instance.display_name,
-            instance.id,
+            instance.instance_id,
             active_config.threshold_hours,
             active_config.dry_run,
         )
-        terminate_instance(compute_client, instance.id, dry_run=active_config.dry_run)
+        terminate_instance(compute_client, instance.instance_id, dry_run=active_config.dry_run)
+
+    if active_config.report_file:
+        report = {
+            "candidate_count": candidate_count,
+            "compartment_id": active_config.compartment_id,
+            "decisions": [asdict(decision) for decision in decisions],
+            "dry_run": active_config.dry_run,
+            "processed_count": len(candidates),
+        }
+        write_cleanup_report(active_config.report_file, report)
 
     return len(candidates)
 
