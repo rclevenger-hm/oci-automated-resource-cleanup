@@ -20,6 +20,8 @@ class CleanupConfig:
     dry_run: bool = True
     required_tag_key: Optional[str] = None
     required_tag_value: Optional[str] = None
+    excluded_tag_key: Optional[str] = None
+    excluded_tag_value: Optional[str] = None
     auth_mode: str = "auto"
     config_path: Optional[str] = None
     config_profile: str = "DEFAULT"
@@ -45,6 +47,11 @@ def load_config(overrides: Optional[Mapping[str, Any]] = None) -> CleanupConfig:
         "required_tag_value",
         os.environ.get("OCI_CLEANUP_REQUIRED_TAG_VALUE"),
     )
+    excluded_tag_key = override_values.get("excluded_tag_key", os.environ.get("OCI_CLEANUP_EXCLUDED_TAG_KEY"))
+    excluded_tag_value = override_values.get(
+        "excluded_tag_value",
+        os.environ.get("OCI_CLEANUP_EXCLUDED_TAG_VALUE"),
+    )
     auth_mode = override_values.get("auth_mode", os.environ.get("OCI_AUTH_MODE", "auto"))
     config_path = override_values.get("config_path", os.environ.get("OCI_CONFIG_FILE"))
     config_profile = override_values.get("config_profile", os.environ.get("OCI_CONFIG_PROFILE", "DEFAULT"))
@@ -55,6 +62,8 @@ def load_config(overrides: Optional[Mapping[str, Any]] = None) -> CleanupConfig:
         dry_run=dry_run,
         required_tag_key=required_tag_key,
         required_tag_value=required_tag_value,
+        excluded_tag_key=excluded_tag_key,
+        excluded_tag_value=excluded_tag_value,
         auth_mode=auth_mode,
         config_path=config_path,
         config_profile=config_profile,
@@ -127,17 +136,36 @@ def has_required_tag(instance, required_tag_key: Optional[str], required_tag_val
     return str(freeform_tags.get(required_tag_key)) == required_tag_value
 
 
+def has_excluded_tag(instance, excluded_tag_key: Optional[str], excluded_tag_value: Optional[str]) -> bool:
+    if not excluded_tag_key:
+        return False
+
+    freeform_tags = getattr(instance, "freeform_tags", {}) or {}
+    if excluded_tag_key not in freeform_tags:
+        return False
+
+    if excluded_tag_value is None:
+        return True
+
+    return str(freeform_tags.get(excluded_tag_key)) == excluded_tag_value
+
+
 def should_terminate_instance(
     instance,
     now: datetime.datetime,
     threshold_hours: int,
     required_tag_key: Optional[str] = None,
     required_tag_value: Optional[str] = None,
+    excluded_tag_key: Optional[str] = None,
+    excluded_tag_value: Optional[str] = None,
 ) -> bool:
     if getattr(instance, "lifecycle_state", None) != "RUNNING":
         return False
 
     if not has_required_tag(instance, required_tag_key, required_tag_value):
+        return False
+
+    if has_excluded_tag(instance, excluded_tag_key, excluded_tag_value):
         return False
 
     launch_time = normalize_timestamp(instance.time_created)
@@ -156,6 +184,8 @@ def get_cleanup_candidates(compute_client, config: CleanupConfig):
             config.threshold_hours,
             config.required_tag_key,
             config.required_tag_value,
+            config.excluded_tag_key,
+            config.excluded_tag_value,
         ):
             candidates.append(instance)
 

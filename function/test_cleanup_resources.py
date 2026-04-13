@@ -60,6 +60,22 @@ class ShouldTerminateInstanceTests(unittest.TestCase):
 
         self.assertTrue(result)
 
+    def test_rejects_instance_with_exclusion_tag(self):
+        instance = make_instance(freeform_tags={"AutoCleanup": "true", "DoNotCleanup": "true"})
+        now = datetime.datetime.now(datetime.timezone.utc)
+
+        result = cleanup_resources.should_terminate_instance(
+            instance,
+            now,
+            threshold_hours=24,
+            required_tag_key="AutoCleanup",
+            required_tag_value="true",
+            excluded_tag_key="DoNotCleanup",
+            excluded_tag_value="true",
+        )
+
+        self.assertFalse(result)
+
 
 class TerminateInstanceTests(unittest.TestCase):
     def test_dry_run_skips_termination(self):
@@ -90,6 +106,8 @@ class LoadConfigTests(unittest.TestCase):
                 "dry_run": False,
                 "required_tag_key": "AutoCleanup",
                 "required_tag_value": "true",
+                "excluded_tag_key": "DoNotCleanup",
+                "excluded_tag_value": "true",
                 "auth_mode": "resource_principal",
             }
         )
@@ -99,6 +117,8 @@ class LoadConfigTests(unittest.TestCase):
         self.assertFalse(config.dry_run)
         self.assertEqual(config.required_tag_key, "AutoCleanup")
         self.assertEqual(config.required_tag_value, "true")
+        self.assertEqual(config.excluded_tag_key, "DoNotCleanup")
+        self.assertEqual(config.excluded_tag_value, "true")
         self.assertEqual(config.auth_mode, "resource_principal")
 
 
