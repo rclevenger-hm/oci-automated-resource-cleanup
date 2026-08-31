@@ -1,0 +1,28 @@
+name: Test cleanup policy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Compile function sources
+        run: python -m compileall -q function
+      - name: Run policy and cleanup unit tests
+        working-directory: function
+        run: python -m unittest -v test_cleanup_resources.py
