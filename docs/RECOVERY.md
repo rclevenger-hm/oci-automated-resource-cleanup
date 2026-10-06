@@ -2,6 +2,12 @@
 
 The janitor is designed to reduce the probability and blast radius of an incorrect cleanup decision, but operators still need a defined response when a managed resource is stopped or terminated unexpectedly.
 
+Version 0.2 requires shared Object Storage for live actions. For crashed workers,
+retained locks, pending intents, or uncertain API responses, follow the
+[durable execution recovery procedure](DURABLE_EXECUTION.md#crash-and-uncertain-result-recovery).
+Prove the old worker cannot resume before releasing its lock. Preserve action
+reservations and pending intent until OCI Audit evidence has been reconciled.
+
 ## First response
 
 If a run appears wrong:
@@ -16,6 +22,7 @@ If a run appears wrong:
 For an unintentionally stopped Compute instance:
 
 - confirm the instance was stopped by the janitor report/action trail;
+- remember that `submitted` records API acceptance, while current instance state and OCI Audit establish what happened;
 - verify the resource is still intended to exist;
 - add or restore `DoNotCleanup=true` before restart when there is any policy ambiguity;
 - start the instance through the normal OCI control path;
@@ -37,6 +44,12 @@ Before enabling live termination in any environment, document:
 - secret/bootstrap dependencies needed to return the workload to service.
 
 If those controls are not known, use `stop` rather than `terminate`.
+
+The current termination call retains OCI's default boot-volume behavior (deletion);
+this release does not add a backup or volume-preservation policy. Live termination
+does require an accepted janitor stop, a recorded STOPPED observation, a complete
+grace interval, and an unchanged ETag. Those gates are preventive controls, not a
+backup strategy.
 
 ## Policy rollback
 

@@ -13,14 +13,22 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
+        dependencies: ["none", "minimum", "latest"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Install minimum supported runtime dependencies
+        if: matrix.dependencies == 'minimum'
+        run: python -m pip install 'oci==2.185.1' 'fdk==0.1.117'
+      - name: Install current compatible runtime dependencies
+        if: matrix.dependencies == 'latest'
+        run: python -m pip install -r function/requirements.txt
       - name: Compile function sources
         run: python -m compileall -q function
       - name: Run janitor unit tests

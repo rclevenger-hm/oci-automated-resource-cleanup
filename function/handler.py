@@ -4,6 +4,7 @@ import logging
 from typing import Any, Dict, Optional
 
 import cleanup_resources
+from state_store import RunLocked, StateError
 
 try:
     from fdk import response
@@ -87,11 +88,12 @@ def handler(ctx, data: io.BytesIO = None):
 
     try:
         payload = _read_payload(data)
-        config = cleanup_resources.load_config(payload)
+        config = cleanup_resources.load_request_config(payload)
         report = cleanup_resources.run_janitor(config)
+        status = report.get("status", "completed")
         LOGGER.info(
             _event(
-                "janitor.run.completed",
+                "janitor.run." + status,
                 request_id,
                 scanned_count=report["scanned_count"],
                 candidate_count=report["candidate_count"],
@@ -100,13 +102,19 @@ def handler(ctx, data: io.BytesIO = None):
                 dry_run=report["dry_run"],
                 limited=report["limited"],
                 reason_counts=report["reason_counts"],
+                run_id=report.get("run_id"),
+                outcome_counts=report.get("outcome_counts", {}),
+                outcome_reason_counts=report.get("outcome_reason_counts", {}),
             )
         )
         return _build_response(
             ctx,
             _correlated_body(
                 {
-                    "status": "ok",
+                    "status": "ok" if status == "completed" else status,
+                    "run_id": report.get("run_id"),
+                    "outcome_counts": report.get("outcome_counts", {}),
+                    "outcome_reason_counts": report.get("outcome_reason_counts", {}),
                     "action": report["action"],
                     "dry_run": report["dry_run"],
                     "compartment_id": report["compartment_id"],
@@ -118,6 +126,15 @@ def handler(ctx, data: io.BytesIO = None):
                 },
                 request_id,
             ),
+            status_code={"completed": 200, "partial": 207, "failed": 503}[status],
+        )
+    except (RunLocked, StateError) as exc:
+        category = "concurrency" if isinstance(exc, RunLocked) else "persistence"
+        LOGGER.exception(_event("janitor.run.failed", request_id, failure_category=category))
+        return _build_response(
+            ctx,
+            _correlated_body({"status": "error", "message": category + " safeguard blocked execution"}, request_id),
+            409 if isinstance(exc, RunLocked) else 503,
         )
     except (KeyError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         LOGGER.error(

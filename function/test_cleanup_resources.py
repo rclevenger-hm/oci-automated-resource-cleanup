@@ -193,7 +193,7 @@ class ConfigTests(unittest.TestCase):
             cleanup_resources.validate_config(config(action="terminate", dry_run=False, allow_terminate=False))
 
     def test_live_termination_can_be_explicitly_enabled(self):
-        cleanup_resources.validate_config(config(action="terminate", dry_run=False, allow_terminate=True))
+        cleanup_resources.validate_config(config(action="terminate", dry_run=False, allow_terminate=True, state_namespace="ns", state_bucket="audit"))
 
     def test_required_tag_cannot_be_disabled(self):
         with self.assertRaisesRegex(ValueError, "explicit opt-in"):
@@ -259,13 +259,13 @@ class ActionTests(unittest.TestCase):
 
     def test_stop_uses_instance_action(self):
         client = Mock()
-        cleanup_resources.execute_cleanup_action(client, "ocid1", action="stop", dry_run=False)
-        client.instance_action.assert_called_once_with("ocid1", "STOP")
+        cleanup_resources.execute_cleanup_action(client, "ocid1", action="stop", dry_run=False, if_match="v1", retry_token="token")
+        client.instance_action.assert_called_once_with("ocid1", "STOP", if_match="v1", opc_retry_token="token")
 
     def test_terminate_uses_terminate_instance(self):
         client = Mock()
-        cleanup_resources.execute_cleanup_action(client, "ocid1", action="terminate", dry_run=False)
-        client.terminate_instance.assert_called_once_with("ocid1")
+        cleanup_resources.execute_cleanup_action(client, "ocid1", action="terminate", dry_run=False, if_match="v1")
+        client.terminate_instance.assert_called_once_with("ocid1", if_match="v1")
 
 
 class RunJanitorTests(unittest.TestCase):
@@ -283,7 +283,8 @@ class RunJanitorTests(unittest.TestCase):
         self.assertEqual(report["candidate_count"], 3)
         self.assertEqual(report["selected_count"], 2)
         self.assertTrue(report["limited"])
-        self.assertEqual(mock_action.call_count, 2)
+        mock_action.assert_not_called()
+        self.assertEqual(len(report["outcomes"]), 2)
 
     @patch("cleanup_resources.execute_cleanup_action")
     @patch("cleanup_resources.get_cleanup_decisions")
@@ -310,6 +311,8 @@ class RunJanitorTests(unittest.TestCase):
             "dry_run": False,
         }
         self.assertEqual(cleanup_resources.main(), 0)
+        mock_run.return_value["status"] = "partial"
+        self.assertEqual(cleanup_resources.main(), 1)
 
     @patch("cleanup_resources.execute_cleanup_action")
     @patch("cleanup_resources.get_cleanup_decisions")
@@ -324,7 +327,7 @@ class RunJanitorTests(unittest.TestCase):
             report = cleanup_resources.run_janitor(config(action="report", report_file=path))
             with open(path, "r", encoding="utf-8") as handle:
                 written = json.load(handle)
-        self.assertEqual(written["schema_version"], 1)
+        self.assertEqual(written["schema_version"], 2)
         self.assertEqual(written["candidate_count"], report["candidate_count"])
 
 
