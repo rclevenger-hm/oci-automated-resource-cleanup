@@ -27,7 +27,7 @@ class ActionSelectionTests(unittest.TestCase):
             cleanup_resources.JanitorConfig(
                 compartment_id="compartment",
                 action="stop",
-                dry_run=False,
+                dry_run=True,
                 max_actions_per_run=2,
             )
         )
@@ -35,12 +35,10 @@ class ActionSelectionTests(unittest.TestCase):
         self.assertEqual(report["candidate_count"], 3)
         self.assertEqual(report["selected_count"], 2)
         self.assertTrue(report["limited"])
+        mock_action.assert_not_called()
         self.assertEqual(
-            mock_action.call_args_list,
-            [
-                call(client, "ocid-oldest", action="stop", dry_run=False),
-                call(client, "ocid-middle", action="stop", dry_run=False),
-            ],
+            [item["resource_id"] for item in report["outcomes"]],
+            ["ocid-oldest", "ocid-middle"],
         )
 
     def test_sort_key_is_stable_for_missing_expiration(self):

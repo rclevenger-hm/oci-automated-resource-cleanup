@@ -2,6 +2,11 @@
 
 The janitor is destructive-capable automation, so its telemetry should answer three questions quickly: **what did it evaluate, what did it intend to change, and did the run remain inside policy?** The structured report and run events are the source contracts for those signals.
 
+Schema 2 live runs persist their plan and per-resource outcomes in Object Storage.
+See [durable execution](DURABLE_EXECUTION.md) for setup, locking, budgets, and recovery.
+Selection counts describe intent; outcome counts distinguish submitted, failed,
+unknown, skipped, and unattempted actions. Submission is not completion confirmation.
+
 ## Run-level signals
 
 Emit one completion event for every successful invocation, including dry runs. Derive these fields directly from the report returned by `run_janitor`:
@@ -10,7 +15,7 @@ Emit one completion event for every successful invocation, including dry runs. D
 | --- | --- | --- |
 | `janitor.scanned` | `scanned_count` | Resources evaluated in the target compartment. |
 | `janitor.candidates` | `candidate_count` | Expired resources that passed policy checks. |
-| `janitor.selected` | `selected_count` | Resources selected after the action cap. |
+| `janitor.selected` | `selected_count` | Live reserved attempts after safety gates/caps; capped candidates in previews. |
 | `janitor.limited` | `limited` | Whether blast-radius limiting suppressed eligible actions. |
 | `janitor.action` | `action` | `report`, `stop`, or `terminate`. |
 | `janitor.dry_run` | `dry_run` | Whether mutation was disabled. |
@@ -53,7 +58,16 @@ Example runtime failure event:
 }
 ```
 
-The current handler categories are `configuration` and `runtime`; more specific authentication, discovery, and mutation categories should be introduced only when those failure boundaries can be identified reliably without misclassifying SDK failures.
+Pre-execution handler failure categories include `configuration`, `runtime`,
+`concurrency`, and `persistence`. Execution outcomes additionally distinguish
+resource-specific rejection, authorization failure, and service/unknown results.
+
+Recorded live runs emit `janitor.run.completed`, `janitor.run.partial`, or
+`janitor.run.failed`, with `run_id`, `outcome_counts`, and
+`outcome_reason_counts` alongside the existing fields. Grace periods, changed
+eligibility, shared-budget exhaustion, and unresolved prior actions appear in the
+outcome reasons, independently of discovery reason counts. Use run IDs to locate
+protected audit reports; do not add them as metric labels.
 
 ## Alerts
 
@@ -65,6 +79,9 @@ Recommended initial alerts are intentionally small and actionable:
 4. **Blast-radius cap reached:** `limited=true`; review why more resources expired than the configured action budget permits.
 5. **Discovery collapse:** `scanned_count` drops unexpectedly to zero or materially below its normal range; treat this as an auth/discovery signal, not evidence that nothing requires cleanup.
 6. **Policy rejection spike:** sudden growth in `invalid_ttl_tag` or `invalid_expiration_tag` decisions indicates malformed ownership/lifecycle metadata.
+7. **Uncertain action:** an `unknown` outcome or `unresolved_previous_action` reason requires reconciliation before that resource can be changed again.
+8. **Persistent scope lock:** repeated concurrency failures or missing scheduled completions may indicate a crashed worker. Follow the recovery procedure; never clear a lock based only on its age.
+9. **Partial run:** `janitor.run.partial` means some selected resources failed or remained unresolved, even though HTTP 207 is in the success class.
 
 Do not page merely because `candidate_count > 0`; discovering expired managed resources is the normal purpose of the janitor.
 
@@ -75,7 +92,7 @@ For a scheduled janitor, useful reliability objectives are about execution rathe
 - **Scheduled-run success:** at least 99% of expected runs complete successfully over 30 days.
 - **Audit completeness:** every successful run emits exactly one report with `schema_version`, `generated_at`, action state, aggregate counts, reason counts, and decisions, plus one `janitor.run.completed` event.
 - **Mutation accountability:** every live selected resource has a corresponding decision record from the same run.
-- **Duplicate scheduling:** overlapping invocations should be detectable operationally before extending the janitor to resource types where concurrent mutations can conflict.
+- **Duplicate scheduling:** live invocations use one conditional scope lock; duplicates return 409. All writers in a region/compartment must share the configured state destination and budget policy.
 
 These objectives intentionally avoid treating a high deletion count as success.
 

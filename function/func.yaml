@@ -1,6 +1,6 @@
 schema_version: 20180708
 name: oci-ephemeral-resource-janitor
-version: 0.1.0
+version: 0.2.0
 runtime: python
 entrypoint: /python/bin/fdk /function/handler.py handler
 memory: 256

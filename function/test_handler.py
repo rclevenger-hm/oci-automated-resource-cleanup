@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 import handler
+from state_store import RunLocked, StateError
 
 
 class FunctionContext:
@@ -15,6 +16,11 @@ class FunctionContext:
 
 
 class HandlerTests(unittest.TestCase):
+    def setUp(self):
+        fallback = patch.object(handler, "response", None)
+        fallback.start()
+        self.addCleanup(fallback.stop)
+
     def test_rejects_non_object_json(self):
         result = handler.handler(None, io.BytesIO(b"[]"))
         self.assertEqual(result["status_code"], 400)
@@ -36,7 +42,7 @@ class HandlerTests(unittest.TestCase):
 
     @patch.object(handler.LOGGER, "info")
     @patch("handler.cleanup_resources.run_janitor")
-    @patch("handler.cleanup_resources.load_config")
+    @patch("handler.cleanup_resources.load_request_config")
     def test_returns_run_summary_and_logs_completion(self, mock_load_config, mock_run_janitor, mock_log_info):
         mock_load_config.return_value = object()
         mock_run_janitor.return_value = {
@@ -82,7 +88,7 @@ class HandlerTests(unittest.TestCase):
 
     @patch.object(handler.LOGGER, "exception")
     @patch("handler.cleanup_resources.run_janitor", side_effect=RuntimeError("internal tenancy detail"))
-    @patch("handler.cleanup_resources.load_config", return_value=object())
+    @patch("handler.cleanup_resources.load_request_config", return_value=object())
     def test_internal_failure_does_not_leak_exception_detail(
         self,
         mock_load_config,
@@ -101,6 +107,34 @@ class HandlerTests(unittest.TestCase):
             "request_id": "call-error",
         })
         self.assertNotIn("internal tenancy detail", mock_log_exception.call_args.args[0])
+
+    @patch("handler.cleanup_resources.load_request_config", return_value=object())
+    def test_partial_and_aborted_runs_have_distinct_statuses(self, mock_config):
+        summary = {
+            "run_id": "run-123", "action": "stop", "dry_run": False,
+            "compartment_id": "compartment", "scanned_count": 2,
+            "candidate_count": 2, "selected_count": 2, "limited": False,
+            "reason_counts": {"expired": 2},
+            "outcome_counts": {"submitted": 1, "failed": 1},
+        }
+        for status, code in (("partial", 207), ("failed", 503)):
+            with self.subTest(status=status), patch(
+                "handler.cleanup_resources.run_janitor", return_value={**summary, "status": status}
+            ):
+                result = handler.handler(None, io.BytesIO(b"{}"))
+                self.assertEqual(result["status_code"], code)
+                body = json.loads(result["body"])
+                self.assertEqual(body["run_id"], "run-123")
+                self.assertEqual(body["outcome_counts"]["submitted"], 1)
+
+    @patch("handler.cleanup_resources.load_request_config", return_value=object())
+    @patch.object(handler.LOGGER, "exception")
+    def test_lock_and_storage_errors_are_bounded(self, mock_log, mock_config):
+        for error, code in ((RunLocked("private lock path"), 409), (StateError("private bucket"), 503)):
+            with self.subTest(code=code), patch("handler.cleanup_resources.run_janitor", side_effect=error):
+                result = handler.handler(None, io.BytesIO(b"{}"))
+                self.assertEqual(result["status_code"], code)
+                self.assertNotIn("private", result["body"])
 
 
 if __name__ == "__main__":

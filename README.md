@@ -24,9 +24,14 @@ The defaults are deliberately conservative:
 4. **Only 10 resources are selected per run by default** to cap blast radius.
 5. **`DoNotCleanup=true` always protects a managed resource** by default.
 6. **Termination has a second interlock.** Live termination requires `dry_run=false`, `action=terminate`, and `allow_terminate=true`.
-7. **Termination is two-phase by default.** Only already-`STOPPED` instances are eligible for termination unless `termination_requires_stopped=false` is explicitly configured.
-8. **Malformed lifecycle tags fail closed.** Invalid TTL or expiration values make a resource ineligible rather than guessing.
-9. Every evaluated resource can be emitted in a structured JSON audit report with its eligibility reason.
+7. **Live termination requires janitor stop history and a grace period.** The default is 24 hours from the first recorded STOPPED observation, with an unchanged resource ETag.
+8. **Malformed lifecycle tags fail closed.** Non-finite, out-of-range, or overflowing TTLs reject the individual resource.
+9. **Live actions require durable Object Storage state.** A complete plan and each action intent/outcome are checkpointed; partial failures retain audit evidence.
+10. **Concurrent runs share one scope lock and a rolling action budget**, defaulting to 10 reservations per hour across stop and terminate runs.
+11. **Eligibility is refreshed before action**, and conditional ETags reject intervening changes.
+12. **Function requests may only narrow operator policy.** They cannot enable termination, remove protections, expand action limits, or change the target compartment.
+
+Read the [durable execution and migration guide](docs/DURABLE_EXECUTION.md) before enabling live actions or upgrading an existing live deployment. Dry-run and report-only use do not require state storage.
 
 A typical production pattern is therefore:
 
@@ -98,7 +103,7 @@ Actionable states differ by lifecycle action:
 - `stop`: only expired `RUNNING` managed instances are eligible;
 - `terminate`: only expired `STOPPED` managed instances are eligible by default.
 
-Direct termination of running instances can be enabled, but it requires an explicit policy override in addition to the live-termination interlock.
+Live termination additionally checks durable janitor stop history and the recovery grace period. Direct termination of running instances is rejected for live runs. A non-mutating preview can still use the legacy state override.
 
 ## Structured Reporting
 
@@ -111,7 +116,11 @@ Each run produces a report containing:
 - scanned, eligible, and selected counts;
 - whether the run was limited by the action cap;
 - counts grouped by decision reason;
-- one decision record per evaluated resource.
+- one decision record per evaluated resource;
+- schema 2 run ID, run status, and per-selected-resource outcomes;
+- live execution guard, rolling budget, and partial-failure evidence.
+
+The complete plan is persisted before live mutation, with an updated checkpoint after every action. `submitted` means OCI accepted the request; it does not claim the asynchronous operation has finished. A storage failure leaves the latest checkpoint and scope lock available for recovery.
 
 Typical decision reasons include:
 
@@ -127,7 +136,7 @@ This makes dry-runs useful as audit output rather than simply logging "would del
 
 ## Configuration
 
-Configuration can come from environment variables, a JSON policy file, or an OCI Function request payload. Request values override environment values, and environment values override policy-file defaults.
+Operator configuration comes from environment variables over JSON policy-file defaults. Function requests can only select report mode, enable dry-run, increase the global TTL, reduce the per-run action cap, or repeat the configured action/compartment. All other request fields are rejected. See [request policy](docs/DURABLE_EXECUTION.md#request-policy).
 
 ### Primary environment variables
 
@@ -145,7 +154,13 @@ Configuration can come from environment variables, a JSON policy file, or an OCI
 | `OCI_JANITOR_TTL_TAG_KEY` | `TTLHours` | Per-resource TTL tag. |
 | `OCI_JANITOR_EXPIRES_AT_TAG_KEY` | `ExpiresAt` | Absolute expiration tag. |
 | `OCI_JANITOR_ALLOW_TERMINATE` | `false` | Required second interlock for live termination. |
-| `OCI_JANITOR_TERMINATION_REQUIRES_STOPPED` | `true` | Enforces two-phase stop-then-terminate behavior. |
+| `OCI_JANITOR_TERMINATION_REQUIRES_STOPPED` | `true` | Mandatory for live termination; false is preview-only. |
+| `OCI_JANITOR_TERMINATION_GRACE_HOURS` | `24` | Minimum interval after first STOPPED observation; positive and finite. |
+| `OCI_JANITOR_STATE_NAMESPACE` | unset | Object Storage namespace; required for live actions. |
+| `OCI_JANITOR_STATE_BUCKET` | unset | Shared private state/audit bucket; required for live actions. |
+| `OCI_JANITOR_STATE_PREFIX` | `janitor/v1` | Must match across all writers for the same scope. |
+| `OCI_JANITOR_MAX_ACTIONS_PER_WINDOW` | `10` | Shared rolling budget, including failed/unknown attempts. |
+| `OCI_JANITOR_ACTION_WINDOW_SECONDS` | `3600` | Rolling reservation window. |
 | `OCI_JANITOR_REPORT_FILE` | unset | Optional path for the structured JSON report. |
 | `OCI_JANITOR_POLICY_FILE` | unset | Optional JSON policy file. |
 | `OCI_AUTH_MODE` | `auto` | `auto`, `config`, or `resource_principal`. |
@@ -166,6 +181,9 @@ See [`examples/policy.json`](examples/policy.json).
   "dry_run": true,
   "action": "report",
   "max_actions_per_run": 10,
+  "max_actions_per_window": 10,
+  "action_window_seconds": 3600,
+  "termination_grace_hours": 24,
   "required_tag_key": "JanitorManaged",
   "required_tag_value": "true",
   "excluded_tag_key": "DoNotCleanup",
@@ -195,16 +213,18 @@ export OCI_JANITOR_DRY_RUN='true'
 python function/cleanup_resources.py
 ```
 
-Stop expired managed instances:
+Configure the shared bucket and [required IAM](docs/DURABLE_EXECUTION.md#configure-storage-before-enabling-live-actions), then stop expired managed instances:
 
 ```bash
 export OCI_COMPARTMENT_ID='ocid1.compartment.oc1..exampleuniqueID'
 export OCI_JANITOR_ACTION='stop'
 export OCI_JANITOR_DRY_RUN='false'
+export OCI_JANITOR_STATE_NAMESPACE='<your-object-storage-namespace>'
+export OCI_JANITOR_STATE_BUCKET='janitor-state'
 python function/cleanup_resources.py
 ```
 
-Terminate expired instances that are already stopped:
+Using the same state configuration, evaluate termination of expired instances stopped by the janitor:
 
 ```bash
 export OCI_COMPARTMENT_ID='ocid1.compartment.oc1..exampleuniqueID'
@@ -214,13 +234,7 @@ export OCI_JANITOR_ALLOW_TERMINATE='true'
 python function/cleanup_resources.py
 ```
 
-Direct termination of an expired running instance requires one additional explicit override:
-
-```bash
-export OCI_JANITOR_TERMINATION_REQUIRES_STOPPED='false'
-```
-
-That mode is intentionally not the default.
+The first terminate run observes STOPPED and starts the grace period. A later run may terminate after that interval, provided the resource still qualifies and its ETag is unchanged. Existing manually stopped resources are skipped. Stop/terminate API behavior and boot-volume preservation defaults remain unchanged; review [recovery prerequisites](docs/RECOVERY.md) before enabling termination.
 
 ## Deploy as an OCI Function
 
@@ -238,7 +252,7 @@ fn config function <your_fn_app_name> oci-ephemeral-resource-janitor OCI_AUTH_MO
 
 Then configure the janitor policy on the Function/application and grant the resource principal the least privilege needed to list instances and perform only the actions you enable.
 
-The function accepts the same lower-case policy fields as a JSON request body, for example:
+The function accepts only the restricted lower-case request fields, for example (TTL must be at least the operator threshold and cap no greater than its limit):
 
 ```json
 {
@@ -250,7 +264,7 @@ The function accepts the same lower-case policy fields as a JSON request body, f
 }
 ```
 
-The response includes scanned, eligible, selected, limited, and reason-count summaries.
+The response includes the run ID, scanned/eligible/selected counts, limit state, decision reasons, and outcome counts. Partial resource failures return 207, scope conflicts 409, and service/persistence failures 503. CLI partial/failed runs exit nonzero.
 
 ## Tests
 
@@ -259,7 +273,7 @@ cd function
 python -m unittest discover -v -p 'test_*.py'
 ```
 
-The test suite covers policy precedence, opt-in safety, exclusion behavior, per-resource TTLs, absolute expiration, malformed-tag fail-closed behavior, action caps, reporting, destructive-action interlocks, two-phase termination, CLI exit semantics, and the OCI Function handler.
+The test suite covers policy precedence and request narrowing, opt-in safety, malformed and overflowing TTLs, fresh eligibility and ETags, partial/uncertain action results, persistent plans, storage failures, concurrent locks, shared budgets, recovery intervals, CLI status, and the Function handler. CI runs on Python 3.11/3.12 with no dependencies, minimum supported dependencies, and current compatible dependencies. SDK/FDK contract tests mock transport and do not contact OCI.
 
 ## Repository Layout
 
@@ -267,6 +281,8 @@ The test suite covers policy precedence, opt-in safety, exclusion behavior, per-
 .github/workflows/test.yml       CI for Python 3.11 and 3.12
 examples/policy.json             Safe example policy
 function/cleanup_resources.py    Policy engine, OCI discovery, actions, reporting
+function/execution.py            Durable live execution and recovery gates
+function/state_store.py          Conditional shared Object Storage state
 function/handler.py              OCI Functions entrypoint
 function/func.yaml               OCI Functions manifest
 function/test_cleanup_resources.py
@@ -281,7 +297,7 @@ Today the janitor supports OCI Compute instances. Natural extensions are other r
 - temporary public IPs;
 - short-lived snapshots or custom images;
 - ephemeral load balancers or test-network resources;
-- report publication to Object Storage / OCI Logging;
+- dashboard integration for persistent reports and structured runtime events;
 - Notifications integration for action summaries and failures;
 - optional OCI Monitoring signals as an additional safety condition, never as a replacement for explicit ownership policy.
 
